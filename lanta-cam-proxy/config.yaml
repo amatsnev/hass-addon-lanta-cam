@@ -8,7 +8,6 @@ arch:
   - aarch64
 startup: services
 init: false
-map: []
 ports:
   8199/tcp: 8199
 ports_description:
