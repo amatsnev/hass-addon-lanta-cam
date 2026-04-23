@@ -20,12 +20,14 @@ ssl_ctx.verify_mode = ssl.CERT_NONE
 BASE_URL = "https://cam.lanta-net.ru"
 LOGIN = os.environ.get("LANTA_LOGIN", "")
 PASSWORD = os.environ.get("LANTA_PASSWORD", "")
-TOKEN_REFRESH_INTERVAL = int(os.environ.get("TOKEN_REFRESH_INTERVAL", "7200"))
+TOKEN_REFRESH_INTERVAL = int(os.environ.get("TOKEN_REFRESH_INTERVAL", "5400"))
 PORT = int(os.environ.get("PORT", "8080"))
 
 cameras = {}
 last_refresh = 0
-_stream_session = None
+_auth_session = None
+_auth_lock = asyncio.Lock()
+_auth_time = 0
 
 
 def calc_password_hash(login, password):
@@ -33,33 +35,24 @@ def calc_password_hash(login, password):
     return hashlib.md5((phone + password).encode()).hexdigest()
 
 
-async def get_stream_session():
-    global _stream_session
-    if _stream_session and not _stream_session.closed:
-        return _stream_session
-    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-    _stream_session = aiohttp.ClientSession(
-        connector=connector,
-        headers={
-            "Referer": "https://cam.lanta-net.ru/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        },
-    )
-    return _stream_session
-
-
-async def refresh_cameras():
-    global cameras, last_refresh
-    connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-    jar = aiohttp.CookieJar()
-    async with aiohttp.ClientSession(BASE_URL, cookies=jar, connector=connector) as session:
+async def get_auth_session():
+    global _auth_session, _auth_time
+    async with _auth_lock:
+        if _auth_session and not _auth_session.closed and (time.time() - _auth_time) < TOKEN_REFRESH_INTERVAL:
+            return _auth_session
+        if _auth_session and not _auth_session.closed:
+            await _auth_session.close()
+        jar = aiohttp.CookieJar()
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+        session = aiohttp.ClientSession(
+            BASE_URL, cookies=jar, connector=connector,
+            headers={
+                "Referer": "https://cam.lanta-net.ru/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+        )
         try:
-            async with session.post("/user/gettoken") as resp:
-                token = await resp.text()
-                if resp.status != 200:
-                    log.error("Failed to get token: %s %s", resp.status, token)
-                    return
-
+            token = await (await session.post("/user/gettoken")).text()
             pwd_hash = calc_password_hash(LOGIN, PASSWORD)
             async with session.post("/user/auth", data={
                 "login": LOGIN, "password": pwd_hash, "token": token,
@@ -67,46 +60,51 @@ async def refresh_cameras():
                 redirect = (await resp.text()).strip()
                 if resp.status != 200 or not redirect.startswith("/"):
                     log.error("Auth failed: %s %s", resp.status, redirect)
-                    return
-
-            async with session.get("/cameras/get", params={
-                "page": 1, "limit": 100, "search": ""
-            }) as resp:
-                data = await resp.json()
-
-            if not data.get("items"):
-                log.warning("No cameras found")
-                return
-
-            old_count = len(cameras)
-            cameras.clear()
-            for item in data["items"]:
-                cam_id = item["id"]
-                url_path, _, token_qs = item["link_video"].partition("?")
-                cameras[cam_id] = {
-                    "title": item["title"],
-                    "base_url": url_path.rsplit("/", 1)[0],
-                    "token_qs": token_qs,
-                    "preview_url": urljoin(BASE_URL, item["link_preview"]),
-                }
-                log.info("Camera %s: %s", item["title"], item["id"])
-
-            last_refresh = time.time()
-            log.info("Refreshed %d cameras (was %d)", len(cameras), old_count)
+                    await session.close()
+                    return None
+            _auth_session = session
+            _auth_time = time.time()
+            log.info("Auth session created/refreshed")
+            return session
         except Exception as e:
-            log.error("Error refreshing cameras: %s", e)
+            log.error("Auth error: %s", e)
+            await session.close()
+            return None
+
+
+async def refresh_cameras():
+    global cameras, last_refresh
+    session = await get_auth_session()
+    if not session:
+        return
+    try:
+        async with session.get("/cameras/get", params={
+            "page": 1, "limit": 100, "search": ""
+        }) as resp:
+            data = await resp.json()
+        if not data.get("items"):
+            log.warning("No cameras found")
+            return
+        old_count = len(cameras)
+        cameras.clear()
+        for item in data["items"]:
+            cam_id = item["id"]
+            cameras[cam_id] = {
+                "title": item["title"],
+                "link_video": item["link_video"],
+                "preview_url": urljoin(BASE_URL, item["link_preview"]),
+            }
+            log.info("Camera %s: %s", item["title"], item["id"])
+        last_refresh = time.time()
+        log.info("Refreshed %d cameras (was %d)", len(cameras), old_count)
+    except Exception as e:
+        log.error("Error refreshing cameras: %s", e)
 
 
 async def background_refresh():
     while True:
         await refresh_cameras()
         await asyncio.sleep(TOKEN_REFRESH_INTERVAL)
-
-
-def rewrite_m3u8(text, cam_id, upstream_base, proxy_base):
-    text = text.replace(upstream_base, proxy_base)
-    text = re.sub(r'\?token=[^"]+', '', text)
-    return text
 
 
 async def proxy_stream(request):
@@ -117,25 +115,48 @@ async def proxy_stream(request):
     if not cam:
         return web.Response(status=404, text="Camera not found")
 
-    upstream_url = f"{cam['base_url']}/{path}?{cam['token_qs']}"
-    proxy_base = f"/stream/{cam_id}"
+    full_url = cam["link_video"]
+    url_path, _, token_qs = full_url.partition("?")
+    base_url = url_path.rsplit("/", 1)[0]
+    upstream_url = f"{base_url}/{path}?{token_qs}" if token_qs else f"{base_url}/{path}"
+
+    session = await get_auth_session()
+    if not session:
+        return web.Response(status=502, text="Auth failed")
 
     try:
-        session = await get_stream_session()
         async with session.get(upstream_url) as resp:
-            content = await resp.read()
-            content_type = resp.headers.get("Content-Type", "application/vnd.apple.mpegurl")
-
-            if content_type and "mpegurl" in content_type or path.endswith(".m3u8"):
-                text = content.decode("utf-8", errors="replace")
-                text = rewrite_m3u8(text, cam_id, cam["base_url"], proxy_base)
-                content = text.encode("utf-8")
-
-            headers = {"Content-Type": content_type, "Access-Control-Allow-Origin": "*"}
-            return web.Response(body=content, status=resp.status, headers=headers)
+            if resp.status == 403:
+                global _auth_session, _auth_time
+                async with _auth_lock:
+                    if _auth_session and not _auth_session.closed:
+                        await _auth_session.close()
+                    _auth_session = None
+                    _auth_time = 0
+                session = await get_auth_session()
+                if not session:
+                    return web.Response(status=502, text="Re-auth failed")
+                async with session.get(upstream_url) as resp:
+                    return await _process_stream_response(resp, cam_id, path, base_url)
+            return await _process_stream_response(resp, cam_id, path, base_url)
     except Exception as e:
         log.error("Proxy error for camera %s path %s: %s", cam_id, path, e)
         return web.Response(status=502, text=f"Upstream error: {e}")
+
+
+async def _process_stream_response(resp, cam_id, path, upstream_base):
+    content = await resp.read()
+    content_type = resp.headers.get("Content-Type", "application/vnd.apple.mpegurl")
+
+    if (content_type and "mpegurl" in content_type) or path.endswith(".m3u8"):
+        text = content.decode("utf-8", errors="replace")
+        proxy_base = f"/stream/{cam_id}"
+        text = text.replace(upstream_base, proxy_base)
+        text = re.sub(r'\?token=[^\s"]+', '', text)
+        content = text.encode("utf-8")
+
+    headers = {"Content-Type": content_type, "Access-Control-Allow-Origin": "*"}
+    return web.Response(body=content, status=resp.status, headers=headers)
 
 
 async def list_cameras(request):
@@ -158,25 +179,26 @@ async def proxy_preview(request):
     if not cam:
         return web.Response(status=404, text="Camera not found")
 
+    session = await get_auth_session()
+    if not session:
+        return web.Response(status=502, text="Auth failed")
+
     try:
-        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-        jar = aiohttp.CookieJar()
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession(BASE_URL, connector=connector, cookies=jar, headers=headers) as session:
-            token = await (await session.post("/user/gettoken")).text()
-            pwd_hash = calc_password_hash(LOGIN, PASSWORD)
-            await session.post("/user/auth", data={
-                "login": LOGIN, "password": pwd_hash, "token": token,
-            })
-            async with session.get(cam["preview_url"]) as resp:
-                content = await resp.read()
-                return web.Response(body=content, content_type=resp.headers.get("Content-Type", "image/jpeg"))
+        async with session.get(cam["preview_url"]) as resp:
+            content = await resp.read()
+            return web.Response(body=content, content_type=resp.headers.get("Content-Type", "image/jpeg"))
     except Exception as e:
         log.error("Preview error: %s", e)
         return web.Response(status=502, text=str(e))
 
 
 async def force_refresh(request):
+    global _auth_session, _auth_time
+    async with _auth_lock:
+        if _auth_session and not _auth_session.closed:
+            await _auth_session.close()
+        _auth_session = None
+        _auth_time = 0
     await refresh_cameras()
     return web.json_response({"status": "ok", "cameras": len(cameras)})
 
@@ -192,9 +214,9 @@ async def on_startup(app):
     app["refresh_task"] = asyncio.create_task(background_refresh())
 
 async def on_cleanup(app):
-    global _stream_session
-    if _stream_session and not _stream_session.closed:
-        await _stream_session.close()
+    global _auth_session
+    if _auth_session and not _auth_session.closed:
+        await _auth_session.close()
 
 app.on_startup.append(on_startup)
 app.on_cleanup.append(on_cleanup)
