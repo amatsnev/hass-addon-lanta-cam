@@ -7,7 +7,8 @@ arch:
   - amd64
   - aarch64
 startup: services
-init: true
+init: false
+map: []
 ports:
   8199/tcp: 8199
 ports_description:
