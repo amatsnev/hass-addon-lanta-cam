@@ -15,7 +15,7 @@ ports_description:
 options:
   login: ""
   password: ""
-  refresh_interval: 7200
+  refresh_interval: 5400
 schema:
   login: str
   password: str
