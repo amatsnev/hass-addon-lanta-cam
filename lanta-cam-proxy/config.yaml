@@ -6,7 +6,8 @@ url: "https://github.com/amatsnev/hass-addon-lanta-cam"
 arch:
   - amd64
   - aarch64
-init: false
+startup: services
+init: true
 ports:
   8199/tcp: 8199
 ports_description:

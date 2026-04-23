@@ -1,0 +1,6 @@
+#!/bin/sh
+export LANTA_LOGIN=$(jq -r '.login // empty' /data/options.json)
+export LANTA_PASSWORD=$(jq -r '.password // empty' /data/options.json)
+export TOKEN_REFRESH_INTERVAL=$(jq -r '.refresh_interval // 7200' /data/options.json)
+export PORT=8199
+exec python3 /proxy.py
