@@ -2,13 +2,11 @@ name: "Lanta Camera Proxy"
 version: "1.0.0"
 slug: "lanta-cam-proxy"
 description: "Прокси-сервер камер видеонаблюдения LanTa с автоматическим обновлением токенов"
-url: "https://github.com/youruser/hass-addon-lanta-cam"
+url: "https://github.com/amatsnev/hass-addon-lanta-cam"
 arch:
   - amd64
   - aarch64
-  - armv7
 init: false
-image: "homeassistant/amd64-base-{arch}"
 ports:
   8199/tcp: 8199
 ports_description:
