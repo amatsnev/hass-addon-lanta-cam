@@ -235,6 +235,7 @@ async def proxy_ts_stream(request):
             "-tune", "zerolatency",
             "-g", "30",
             "-c:a", "aac",
+            "-vf", "fps=15",
             "-f", "mpegts",
             "-mpegts_service_type", "digital_tv",
             "-flush_packets", "1",
