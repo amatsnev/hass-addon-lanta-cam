@@ -145,7 +145,11 @@ async def proxy_stream(request):
 
 
 async def _process_stream_response(resp, cam_id, path, upstream_base):
+    log.info("Upstream %s for cam %s path %s", resp.status, cam_id, path)
     content = await resp.read()
+    if resp.status != 200 and not path.endswith(".m3u8"):
+        log.error("Upstream error %s for cam %s path %s: %s", resp.status, cam_id, path, content[:200])
+        return web.Response(status=resp.status, body=content)
     content_type = resp.headers.get("Content-Type", "application/vnd.apple.mpegurl")
 
     if (content_type and "mpegurl" in content_type) or path.endswith(".m3u8"):
