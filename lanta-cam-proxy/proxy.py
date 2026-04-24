@@ -225,11 +225,15 @@ async def proxy_ts_stream(request):
     try:
         cmd = [
             FFMPEG, "-hide_banner", "-loglevel", "warning",
-            "-fflags", "genpts",
+            "-fflags", "nobuffer+genpts",
+            "-flags", "low_delay",
+            "-analyzeduration", "1000000",
+            "-probesize", "500000",
             "-i", hls_url,
             "-c", "copy",
             "-f", "mpegts",
             "-mpegts_service_type", "digital_tv",
+            "-flush_packets", "1",
             "-",
         ]
         proc = await asyncio.create_subprocess_exec(
