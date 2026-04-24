@@ -225,6 +225,7 @@ async def proxy_ts_stream(request):
     try:
         cmd = [
             FFMPEG, "-hide_banner", "-loglevel", "warning",
+            "-re",
             "-fflags", "nobuffer+genpts",
             "-flags", "low_delay",
             "-analyzeduration", "1000000",
