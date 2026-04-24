@@ -180,6 +180,16 @@ async def list_cameras(request):
     return web.json_response({"cameras": result, "last_refresh": last_refresh})
 
 
+async def go2rtc_config(request):
+    host = request.headers.get("Host", f"0.0.0.0:{PORT}")
+    lines = ["streams:"]
+    for cam_id, cam in cameras.items():
+        slug = re.sub(r"[^a-z0-9]+", "_", cam["title"].lower()).strip("_")
+        lines.append(f"  {slug}: http://{host}/ts/{cam_id}")
+    text = "\n".join(lines) + "\n"
+    return web.Response(text=text, content_type="text/yaml")
+
+
 async def proxy_preview(request):
     cam_id = int(request.match_info["cam_id"])
     cam = cameras.get(cam_id)
@@ -296,6 +306,7 @@ async def force_refresh(request):
 app = web.Application()
 app.router.add_get("/", list_cameras)
 app.router.add_get("/cameras", list_cameras)
+app.router.add_get("/go2rtc.yaml", go2rtc_config)
 app.router.add_get("/stream/{cam_id}/{path:.+}", proxy_stream)
 app.router.add_get("/ts/{cam_id}", proxy_ts_stream)
 app.router.add_get("/preview/{cam_id}", proxy_preview)

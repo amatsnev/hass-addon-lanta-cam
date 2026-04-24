@@ -1,5 +1,5 @@
 name: "Lanta Camera Proxy"
-version: "1.6.0"
+version: "1.7.0"
 slug: "lanta-cam-proxy"
 description: "Прокси-сервер камер видеонаблюдения LanTa с автоматическим обновлением токенов"
 url: "https://github.com/amatsnev/hass-addon-lanta-cam"
