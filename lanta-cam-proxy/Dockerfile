@@ -1,6 +1,6 @@
 FROM homeassistant/amd64-base:latest
 
-RUN apk add --no-cache python3 py3-pip jq && \
+RUN apk add --no-cache python3 py3-pip jq ffmpeg && \
     pip3 install --no-cache-dir --break-system-packages aiohttp
 
 COPY rootfs /

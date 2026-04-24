@@ -10,6 +10,8 @@ from urllib.parse import urljoin
 import aiohttp
 from aiohttp import web
 
+FFMPEG = os.environ.get("FFMPEG_PATH", "ffmpeg")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("lanta-proxy")
 
@@ -172,6 +174,7 @@ async def list_cameras(request):
             "id": cam_id,
             "title": cam["title"],
             "stream": f"{scheme}://{host}/stream/{cam_id}/index.fmp4.m3u8",
+            "ts": f"{scheme}://{host}/ts/{cam_id}",
             "preview": f"{scheme}://{host}/preview/{cam_id}",
         })
     return web.json_response({"cameras": result, "last_refresh": last_refresh})
@@ -196,6 +199,79 @@ async def proxy_preview(request):
         return web.Response(status=502, text=str(e))
 
 
+async def proxy_ts_stream(request):
+    cam_id = int(request.match_info["cam_id"])
+    cam = cameras.get(cam_id)
+    if not cam:
+        return web.Response(status=404, text="Camera not found")
+
+    session = await get_auth_session()
+    if not session:
+        return web.Response(status=502, text="Auth failed")
+
+    hls_url = cam["link_video"]
+
+    response = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "video/mp2t",
+            "Cache-Control": "no-cache",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+    await response.prepare(request)
+
+    proc = None
+    try:
+        cmd = [
+            FFMPEG, "-hide_banner", "-loglevel", "warning",
+            "-fflags", "genpts",
+            "-i", hls_url,
+            "-c", "copy",
+            "-f", "mpegts",
+            "-mpegts_service_type", "digital_tv",
+            "-",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        log.info("ffmpeg started for cam %s (ts)", cam_id)
+
+        async def _read_stderr():
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                log.warning("ffmpeg[%s]: %s", cam_id, line.decode(errors="replace").rstrip())
+
+        stderr_task = asyncio.create_task(_read_stderr())
+
+        try:
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                try:
+                    await response.write(chunk)
+                except (ConnectionResetError, ConnectionError):
+                    break
+        finally:
+            stderr_task.cancel()
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log.error("TS stream error for cam %s: %s", cam_id, e)
+    finally:
+        if proc and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+            log.info("ffmpeg stopped for cam %s (ts)", cam_id)
+
+    return response
+
+
 async def force_refresh(request):
     global _auth_session, _auth_time
     async with _auth_lock:
@@ -211,6 +287,7 @@ app = web.Application()
 app.router.add_get("/", list_cameras)
 app.router.add_get("/cameras", list_cameras)
 app.router.add_get("/stream/{cam_id}/{path:.+}", proxy_stream)
+app.router.add_get("/ts/{cam_id}", proxy_ts_stream)
 app.router.add_get("/preview/{cam_id}", proxy_preview)
 app.router.add_post("/refresh", force_refresh)
 
